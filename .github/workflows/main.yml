@@ -1,0 +1,46 @@
+# This workflow runs a Python script to crawl data and upload it to the Hugging Face Hub.
+# It is scheduled to run weekly but can also be triggered manually.
+
+name: Crawl and Upload European Directives
+
+# Controls when the workflow will run
+on:
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+  
+  # Runs on a schedule (every Sunday at 3:00 AM UTC)
+  schedule:
+    - cron: '0 3 * * 0'
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest # Use the latest available Ubuntu runner
+
+    steps:
+      # --- Step 1: Check out the repository code ---
+      # This step downloads your repository content into the runner.
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # --- Step 2: Set up Python environment ---
+      # This step installs a specific version of Python.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10' # Specify the Python version
+
+      # --- Step 3: Install Python dependencies ---
+      # This step installs all the required libraries using pip.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pandas beautifulsoup4 lxml datasets huggingface_hub
+
+      # --- Step 4: Run the Python script ---
+      # This step executes your crawling and uploading script.
+      # The `HF_TOKEN` is passed as an environment variable from GitHub Secrets.
+      - name: Run the crawl and upload script
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python run_crawl.py
+
