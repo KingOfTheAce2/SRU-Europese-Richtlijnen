@@ -51,7 +51,8 @@ def fetch_records(start_record: int = 1, limit: int = MAX_RECORDS_PER_RUN):
     # Define namespaces to correctly parse the XML with lxml
     namespaces = {
         'sru': 'http://docs.oasis-open.org/ns/search-ws/sruResponse',
-        'gzd': 'http://standaarden.overheid.nl/sru'
+        'gzd': 'http://standaarden.overheid.nl/sru',
+        'dcterms': 'http://purl.org/dc/terms/'
     }
 
     rows = []
@@ -79,24 +80,35 @@ def fetch_records(start_record: int = 1, limit: int = MAX_RECORDS_PER_RUN):
                 break
 
             for record in records:
-                # Extract the preferred URL
-                url_elem = record.find('.//gzd:preferredUrl', namespaces=namespaces)
-                url = url_elem.text if url_elem is not None else ''
+                # Extract the CELEX number
+                celex_elem = record.find('.//dcterms:isPartOf', namespaces=namespaces)
+                celex_number = celex_elem.text if celex_elem is not None else None
 
-                # Extract the full record data for cleaning
-                recorddata_elem = record.find('.//sru:recordData', namespaces=namespaces)
-                if recorddata_elem is not None:
-                    # Convert the recordData element back to a string for cleaning
-                    raw_xml = etree.tostring(recorddata_elem, encoding='unicode')
-                    content = strip_tags(raw_xml)
-                else:
-                    content = ''
+                # Construct the official EUR-Lex URL based on the CELEX number
+                celex_url = (
+                    f"https://eur-lex.europa.eu/legal-content/NL/TXT/HTML/?uri={celex_number}"
+                    if celex_number
+                    else ''
+                )
+
+                # Download the full text from the EUR-Lex page
+                content = ''
+                if celex_url:
+                    try:
+                        page = requests.get(celex_url, timeout=30)
+                        page.raise_for_status()
+                        content = strip_tags(page.text)
+                    except requests.exceptions.RequestException as e:
+                        print(f"Failed to retrieve CELEX page {celex_url}: {e}")
 
                 rows.append({
-                    "URL": url,
+                    "URL": celex_url,
                     "Content": content,
                     "Source": "Europese Richtlijnen"
                 })
+
+                # Be polite to the EUR-Lex server
+                time.sleep(0.5)
             
             total_records_processed += len(records)
             print(f"Successfully processed {len(records)} records. Total processed: {total_records_processed}")

@@ -1,10 +1,11 @@
 # SRU European Directives
 
-This repository contains a Python crawler that collects "Europese Richtlijnen" (European directives) from the Dutch governmental SRU service. The data is uploaded as a dataset to the [Hugging Face Hub](https://huggingface.co/).
+This repository contains a Python crawler that collects "Europese Richtlijnen" (European directives) from the Dutch governmental SRU service. For each directive the crawler follows the CELEX reference to the official EUR-Lex page and extracts the plain text. The resulting data is uploaded as a dataset to the [Hugging Face Hub](https://huggingface.co/).
 
 ## Features
 
 - Fetches records from the SRU search endpoint in batches.
+- Extracts the CELEX number for each record and downloads the corresponding text from EUR-Lex.
 - Uses a checkpoint file to remember the last fetched record so subsequent runs only process new data.
 - Limits each run to a maximum of 250 records before uploading to Hugging Face.
 - Scheduled weekly via GitHub Actions or can be run locally.
