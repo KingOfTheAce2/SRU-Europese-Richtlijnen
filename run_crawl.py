@@ -5,7 +5,26 @@ import pandas as pd
 from bs4 import BeautifulSoup
 from lxml import etree
 from datasets import Dataset
-from huggingface_hub import HfApi, HfFolder
+from huggingface_hub import HfFolder
+
+CHECKPOINT_FILE = "checkpoint.txt"
+MAX_RECORDS_PER_RUN = 250
+
+def load_checkpoint(file_path: str = CHECKPOINT_FILE) -> int:
+    """Load the starting record from a checkpoint file."""
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r") as f:
+                value = int(f.read().strip())
+                return value
+        except Exception:
+            pass
+    return 1
+
+def save_checkpoint(next_record: int, file_path: str = CHECKPOINT_FILE) -> None:
+    """Save the next starting record to a checkpoint file."""
+    with open(file_path, "w") as f:
+        f.write(str(next_record))
 
 def strip_tags(text: str) -> str:
     """
@@ -15,19 +34,18 @@ def strip_tags(text: str) -> str:
     # Use 'lxml' for speed, fall back to 'html.parser' if needed
     return BeautifulSoup(text, "lxml").get_text(separator="\n", strip=True)
 
-def fetch_all_records():
-    """
-    Crawls the SRU endpoint for 'Europese Richtlijnen', handling pagination.
-    """
+def fetch_records(start_record: int = 1, limit: int = MAX_RECORDS_PER_RUN):
+    """Crawl the SRU endpoint and return up to ``limit`` records starting from
+    ``start_record``. The function stops early if fewer records are available."""
     base_url = "https://zoekservice.overheid.nl/sru/Search"
     params = {
         "x-connection": "eur",
         "operation": "searchRetrieve",
         "version": "2.0",
         "query": "cql.allRecords=1",
-        "startRecord": 1,
-        "maximumRecords": 100,  # Fetch 100 records per request
-        "httpAccept": "application/xml"
+        "startRecord": start_record,
+        "maximumRecords": min(100, limit),
+        "httpAccept": "application/xml",
     }
     
     # Define namespaces to correctly parse the XML with lxml
@@ -38,10 +56,10 @@ def fetch_all_records():
 
     rows = []
     total_records_processed = 0
-    
+
     print("Starting crawl of 'Europese Richtlijnen'...")
 
-    while True:
+    while total_records_processed < limit:
         print(f"Fetching records starting from position {params['startRecord']}...")
         try:
             resp = requests.get(base_url, params=params, timeout=30)
@@ -90,14 +108,19 @@ def fetch_all_records():
                 break
             
             total_records = int(num_records_elem.text)
-            
-            # Move to the next page
-            params["startRecord"] += params["maximumRecords"]
 
-            if params["startRecord"] > total_records:
+            next_start = params["startRecord"] + len(records)
+
+            if total_records_processed >= limit:
+                break
+
+            if next_start > total_records:
                 print("All records have been retrieved.")
                 break
-            
+
+            params["startRecord"] = next_start
+            params["maximumRecords"] = min(100, limit - total_records_processed)
+
             # Be polite to the server by waiting between requests
             time.sleep(1)
 
@@ -111,7 +134,7 @@ def fetch_all_records():
             print(f"An unexpected error occurred: {e}")
             break
             
-    return rows
+    return rows, params["startRecord"]
 
 def main():
     """
@@ -129,7 +152,8 @@ def main():
     print("Successfully authenticated with Hugging Face Hub.")
 
     # --- Step 2: Crawl and Process Data ---
-    records_data = fetch_all_records()
+    start_record = load_checkpoint()
+    records_data, next_start = fetch_records(start_record=start_record, limit=MAX_RECORDS_PER_RUN)
 
     if not records_data:
         print("No data was collected. Exiting.")
@@ -149,10 +173,11 @@ def main():
     # --- Step 4: Upload to Hugging Face Hub ---
     repo_id = "vGassen/Dutch-European-Directives"
     print(f"\nUploading dataset to Hugging Face Hub at {repo_id}...")
-    
+
     try:
-        dataset.push_to_hub(repo_id, private=False) # Set private=True if you want
+        dataset.push_to_hub(repo_id, private=False)  # Set private=True if you want
         print("Dataset successfully uploaded!")
+        save_checkpoint(next_start)
     except Exception as e:
         print(f"An error occurred during upload: {e}")
 
