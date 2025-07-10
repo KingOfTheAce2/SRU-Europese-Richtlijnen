@@ -2,10 +2,9 @@ import os
 import json
 import time
 import logging
-from typing import List, Set, Optional
+from typing import List, Dict, Set
 import requests
 from lxml import etree
-from bs4 import BeautifulSoup
 from datasets import Dataset, concatenate_datasets, load_dataset
 from huggingface_hub import HfApi, login
 
@@ -17,21 +16,15 @@ HTTP_ACCEPT = "application/xml"
 
 # CELEX checkpoint file
 CHECKPOINT_FILE = "processed_celex.json"
-# Batch size for fetching SRU records and for HF pushes
+# Page size for SRU requests and batch size for HF pushes
 PAGE_SIZE = 100
-# Delay seconds between SRU/EUR-Lex requests
+# Delay seconds between SRU requests
 REQUEST_DELAY = 1.0
-# Retry settings for EUR-Lex fetch
-RETRY_ATTEMPTS = 3
-RETRY_BACKOFF = 5
 TIMEOUT = 30
 
-# Hugging Face dataset repo
+# Hugging Face dataset repo and split
 HF_REPO_ID = "vGassen/Dutch-European-Directives"
 HF_SPLIT = "train"
-
-# EUR-Lex content URL template
-EURLEX_URL = "https://eur-lex.europa.eu/legal-content/NL/TXT/HTML/?uri=CELEX:{celex}"
 
 # Fixed source field for HF dataset
 DATA_SOURCE = "EU richtlijnen"
@@ -60,8 +53,8 @@ def save_processed(processed: Set[str]):
         json.dump(sorted(processed), f, indent=2)
 
 # --- SRU crawler ---
-def fetch_celex_sru(start: int = 1) -> List[str]:
-    celexs: Set[str] = set()
+def fetch_sru_records(start: int = 1) -> List[Dict]:
+    records_list: List[Dict] = []
     cursor = start
     total = None
     while True:
@@ -82,36 +75,25 @@ def fetch_celex_sru(start: int = 1) -> List[str]:
             num = root.find('.//sru:numberOfRecords', namespaces=NS)
             total = int(num.text) if num is not None else None
             logger.info(f"Total records: {total}")
-        records = root.findall('.//sru:record', namespaces=NS)
-        if not records:
+        rec_elems = root.findall('.//sru:record', namespaces=NS)
+        if not rec_elems:
             break
-        for rec in records:
-            el = rec.find('.//dcterms:identifier', namespaces=NS)
-            if el is not None and el.text:
-                celexs.add(el.text.strip())
-        count = len(records)
+        for rec in rec_elems:
+            # extract CELEX identifier
+            celex_el = rec.find('.//dcterms:identifier', namespaces=NS)
+            celex = celex_el.text.strip() if celex_el is not None and celex_el.text else None
+            # raw XML of the recordData element
+            data_el = rec.find('.//sru:recordData', namespaces=NS)
+            content = etree.tostring(data_el, encoding='utf-8').decode('utf-8') if data_el is not None else None
+            if celex and content:
+                records_list.append({'url': celex, 'content': content, 'source': DATA_SOURCE})
+        count = len(rec_elems)
         cursor += count
         if total and cursor > total:
             break
         time.sleep(REQUEST_DELAY)
-    logger.info(f"Discovered {len(celexs)} CELEX IDs")
-    return sorted(celexs)
-
-# --- EUR-Lex fetch ---
-def get_with_retries(url: str) -> Optional[requests.Response]:
-    for i in range(RETRY_ATTEMPTS):
-        try:
-            r = requests.get(url, timeout=TIMEOUT)
-            r.raise_for_status()
-            return r
-        except Exception as e:
-            logger.warning(f"Retry {i+1}/{RETRY_ATTEMPTS} failed: {e}")
-            time.sleep(RETRY_BACKOFF)
-    return None
-
-
-def strip_html(html: str) -> str:
-    return BeautifulSoup(html, 'lxml').get_text(separator='\n', strip=True)
+    logger.info(f"Fetched {len(records_list)} SRU records")
+    return records_list
 
 # --- Hugging Face integration ---
 def init_hf_dataset():
@@ -130,47 +112,34 @@ def init_hf_dataset():
     return api, ds
 
 
-def push_to_hf(new_data: List[dict], existing_ds, api: HfApi):
-    ds_new = Dataset.from_list(new_data)
-    combined = concatenate_datasets([existing_ds, ds_new]) if existing_ds else ds_new
+def push_to_hf(batch: List[Dict], existing_ds, api: HfApi):
+    ds_batch = Dataset.from_list(batch)
+    if existing_ds:
+        combined = concatenate_datasets([existing_ds, ds_batch])
+    else:
+        combined = ds_batch
     combined.push_to_hub(HF_REPO_ID, private=False)
     return combined
 
 # --- Main Pipeline ---
 def main():
-    logger.info("--- Starting SRU→EUR-Lex→HF pipeline ---")
+    logger.info("--- Starting SRU→HF pipeline ---")
     processed = load_processed()
-    all_celex = fetch_celex_sru()
-    to_process = [c for c in all_celex if c not in processed]
-    logger.info(f"{len(to_process)} new CELEX IDs to process")
+    all_records = fetch_sru_records()
+    new_records = [r for r in all_records if r['url'] not in processed]
+    logger.info(f"{len(new_records)} new records to upload")
 
     api, existing_ds = init_hf_dataset()
-    batch_data: List[dict] = []
-
-    for idx, celex in enumerate(to_process, 1):
-        url = EURLEX_URL.format(celex=celex)
-        resp = get_with_retries(url)
-        processed.add(celex)
-        if not resp:
-            continue
-        content = strip_html(resp.text)
-        if len(content) < 50:
-            continue
-        batch_data.append({
-            'url': url,
-            'content': content,
-            'source': DATA_SOURCE
-        })
-
-        # push every PAGE_SIZE records or at end
-        if len(batch_data) >= PAGE_SIZE or idx == len(to_process):
-            logger.info(f"Uploading {len(batch_data)} records to Hugging Face...")
-            existing_ds = push_to_hf(batch_data, existing_ds, api)
-            batch_data.clear()
+    batch: List[Dict] = []
+    for idx, rec in enumerate(new_records, 1):
+        batch.append(rec)
+        processed.add(rec['url'])
+        # push every PAGE_SIZE or at end
+        if len(batch) >= PAGE_SIZE or idx == len(new_records):
+            logger.info(f"Uploading {len(batch)} records to Hugging Face...")
+            existing_ds = push_to_hf(batch, existing_ds, api)
             save_processed(processed)
-
-        time.sleep(REQUEST_DELAY)
-
+            batch.clear()
     logger.info("Pipeline complete.")
 
 if __name__ == '__main__':
