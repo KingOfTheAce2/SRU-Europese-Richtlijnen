@@ -48,7 +48,6 @@ def load_processed() -> Set[str]:
             pass
     return set()
 
-
 def save_processed(processed: Set[str]):
     with open(CHECKPOINT_FILE, 'w', encoding='utf-8') as f:
         json.dump(sorted(processed), f, indent=2)
@@ -94,25 +93,36 @@ def fetch_sru_locaties(start: int = 1) -> List[str]:
 # --- XML to CELEX number ---
 def extract_celex_from_xml(xml_url: str) -> Optional[str]:
     try:
+        logger.info(f"Fetching directive XML metadata: {xml_url}")
         r = requests.get(xml_url, timeout=TIMEOUT)
         r.raise_for_status()
         root = etree.fromstring(r.content)
         part = root.find('.//dcterms:isPartOf', namespaces=NS)
         if part is not None and part.text:
-            return part.text.strip()
+            celex = part.text.strip()
+            logger.info(f"Extracted CELEX {celex} from XML: {xml_url}")
+            return celex
+        else:
+            logger.warning(f"No CELEX found in {xml_url}")
     except Exception as e:
         logger.warning(f"Failed to extract CELEX from {xml_url}: {e}")
     return None
 
 # --- EUR-Lex HTML fetch & strip ---
-def fetch_eurlex_text(celex: str) -> Optional[str]:
+def fetch_eurlex_text(celex: str, source_xml_url: Optional[str] = None) -> Optional[str]:
     url = f"https://eur-lex.europa.eu/legal-content/NL/TXT/HTML/?uri=CELEX:{celex}"
+    logger.info(f"Fetching EUR-Lex: {url} (CELEX={celex}) from source XML: {source_xml_url}")
     try:
         r = requests.get(url, timeout=TIMEOUT)
+        logger.info(f"EUR-Lex HTTP status: {r.status_code} for {url}")
         r.raise_for_status()
-        return BeautifulSoup(r.content, 'lxml').get_text(separator='\n', strip=True)
+        # BeautifulSoup warning: if HTML, use lxml; if XML, use features="xml"
+        # EUR-Lex always returns HTML here, so lxml is fine
+        text = BeautifulSoup(r.content, 'lxml').get_text(separator='\n', strip=True)
+        logger.info(f"Fetched text length {len(text)} for CELEX {celex}")
+        return text
     except Exception as e:
-        logger.warning(f"Failed to fetch EUR-Lex for CELEX {celex}: {e}")
+        logger.warning(f"Failed to fetch EUR-Lex for CELEX {celex} at {url} (source XML: {source_xml_url}): {e}")
     return None
 
 # --- Hugging Face integration ---
@@ -129,7 +139,6 @@ def init_hf_dataset():
     except Exception:
         ds = None
     return api, ds
-
 
 def push_batch(api: HfApi, existing_ds, batch: List[dict]):
     ds = Dataset.from_list(batch)
@@ -150,18 +159,23 @@ def main():
 
     # Step 2: for each XML, get CELEX and then EUR-Lex text
     entries = []
-    for xml_url in xml_urls:
+    for idx, xml_url in enumerate(xml_urls, 1):
         celex = extract_celex_from_xml(xml_url)
         if not celex or celex in processed:
+            logger.info(f"Skipping CELEX {celex} (already processed or missing) from {xml_url}")
             continue
-        text = fetch_eurlex_text(celex)
+        text = fetch_eurlex_text(celex, source_xml_url=xml_url)
         if not text or len(text) < 50:
+            logger.warning(f"Text too short or missing for CELEX {celex} at EUR-Lex, marking as processed.")
             processed.add(celex)
             continue
-        entries.append({'url': f"https://eur-lex.europa.eu/legal-content/NL/TXT/HTML/?uri=CELEX:{celex}",
-                         'content': text,
-                         'source': DATA_SOURCE})
+        entries.append({
+            'url': f"https://eur-lex.europa.eu/legal-content/NL/TXT/HTML/?uri=CELEX:{celex}",
+            'content': text,
+            'source': DATA_SOURCE
+        })
         processed.add(celex)
+        logger.info(f"Processed {idx}/{len(xml_urls)}: CELEX {celex}")
         time.sleep(REQUEST_DELAY)
 
     if not entries:
